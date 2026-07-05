@@ -1,0 +1,19 @@
+name: Manual Windows Test Runner
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-run:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: System Diagnostics
+        run: |
+          echo "GitHub Actions Windows Runner is active!"
+          echo "System Info:"
+          systeminfo | findstr /B /C:"OS Name" /C:"OS Version"
+          echo "Current Directory Contents:"
+          dir
