@@ -68,7 +68,7 @@ jobs:
               New-Item -ItemType Directory -Force -Path $outDir | Out-Null
               
               # Execute unrar with password using call & to handle spaces in filenames
-              & $unrar x "-p$($env:RAR_PASSWORD)" "$($file.FullName)" "$outDir"
+              & $unrar x "-p$($env:RAR_PASSWORD)" "$($file.FullName)" "$outDir\"
               
               if ($LASTEXITCODE -ne 0) {
                   Write-Error "Extraction FAILED for $($file.Name) with exit code $LASTEXITCODE"
@@ -83,4 +83,170 @@ jobs:
               exit 1
           } else {
               Write-Output "All archives successfully verified!"
+          }
+
+      - name: Setup .NET Core and Create Tester
+        shell: powershell
+        run: |
+          # Create LicenseTester directory
+          New-Item -ItemType Directory -Force -Path "LicenseTester" | Out-Null
+          
+          $programCs = @'
+          using System;
+          using System.IO;
+          using System.Reflection;
+
+          class Program
+          {
+              static void Main(string[] args)
+              {
+                  if (args.Length < 1)
+                  {
+                      Console.WriteLine("Usage: dotnet run <path_to_dll>");
+                      return;
+                  }
+
+                  string dllPath = args[0];
+                  string licPath = "dummy.lic";
+
+                  // Create dummy license file with invalid signature (unpatched DLLs will fail)
+                  string licContent = @"<License>
+            <Data>
+              <LicensedTo>Soft98</LicensedTo>
+              <EmailTo>customer@soft98.ir</EmailTo>
+              <LicenseType>Developer Small Business</LicenseType>
+              <LicenseNote>Cracked</LicenseNote>
+              <OrderID>260705</OrderID>
+              <UserID>260705</UserID>
+              <OEM>This is a redistributable license</OEM>
+              <Products>
+                <Product>Aspose.Total for .NET</Product>
+              </Products>
+              <EditionType>Enterprise</EditionType>
+              <SerialNumber>12345</SerialNumber>
+              <SubscriptionExpiry>20301231</SubscriptionExpiry>
+              <LicenseVersion>3.0</LicenseVersion>
+            </Data>
+            <Signature>BypassSignatureChecker</Signature>
+          </License>";
+
+                  File.WriteAllText(licPath, licContent);
+
+                  try
+                  {
+                      // Load assembly
+                      Assembly assembly = Assembly.LoadFrom(dllPath);
+                      Console.WriteLine("Loaded assembly: " + assembly.FullName);
+
+                      // Find License class
+                      Type licenseType = null;
+                      foreach (Type type in assembly.GetTypes())
+                      {
+                          if (type.Name == "License" && type.IsClass && type.IsPublic)
+                          {
+                              licenseType = type;
+                              break;
+                          }
+                      }
+
+                      if (licenseType == null)
+                      {
+                          Console.WriteLine("RESULT: FAILED_NO_LICENSE_CLASS (Could not find public License class)");
+                          return;
+                      }
+
+                      // Create instance of License
+                      object licenseInstance = Activator.CreateInstance(licenseType);
+
+                      // Find SetLicense(string) method
+                      MethodInfo setLicenseMethod = licenseType.GetMethod("SetLicense", new Type[] { typeof(string) });
+                      if (setLicenseMethod == null)
+                      {
+                          Console.WriteLine("RESULT: FAILED_NO_SETLICENSE_METHOD (Could not find SetLicense(string) method)");
+                          return;
+                      }
+
+                      // Call SetLicense
+                      setLicenseMethod.Invoke(licenseInstance, new object[] { licPath });
+                      Console.WriteLine("RESULT: SUCCESS (License applied successfully without exceptions)");
+                  }
+                  catch (TargetInvocationException tie)
+                  {
+                      Console.WriteLine("RESULT: FAILED (SetLicense threw exception: " + tie.InnerException.Message + ")");
+                  }
+                  catch (Exception e)
+                  {
+                      Console.WriteLine("RESULT: FAILED_ERROR (Error: " + e.Message + ")");
+                  }
+              }
+          }
+          '@
+          
+          # Initialize .NET Core console app
+          dotnet new console -o LicenseTester --force
+          
+          # Overwrite Program.cs with C# code
+          Set-Content -Path "LicenseTester\Program.cs" -Value $programCs -Force
+          
+          Write-Output "LicenseTester console app initialized successfully."
+
+      - name: Run License/Crack Verification
+        shell: powershell
+        run: |
+          $failedList = @()
+          $successList = @()
+          
+          $extractedDirs = Get-ChildItem -Path "extracted" -Directory
+          foreach ($dir in $extractedDirs) {
+              # Find and sort DLLs to prefer net8, net7, net6, standard before others
+              $dlls = Get-ChildItem -Path $dir.FullName -Filter "Aspose.*.dll" -Recurse | Sort-Object {
+                  if ($_.FullName -like "*net8*") { 1 }
+                  elif ($_.FullName -like "*net7*") { 2 }
+                  elif ($_.FullName -like "*net6*") { 3 }
+                  elif ($_.FullName -like "*netstandard*") { 4 }
+                  elif ($_.FullName -like "*netcore*") { 5 }
+                  else { 6 }
+              }
+              
+              if ($dlls.Count -eq 0) {
+                  Write-Warning "No Aspose.*.dll found in $($dir.Name)"
+                  $failedList += "$($dir.Name) (No DLL found)"
+                  continue
+              }
+              
+              $dll = $dlls[0]
+              Write-Output "=================================================="
+              Write-Output "Verifying License for: $($dir.Name)"
+              Write-Output "Selected DLL: $($dll.FullName)"
+              
+              # Run test program
+              $testResult = dotnet run --project LicenseTester -- "$($dll.FullName)" 2>&1
+              Write-Output $testResult
+              
+              if ($testResult -like "*RESULT: SUCCESS*") {
+                  $successList += $dir.Name
+              } else {
+                  $failedList += "$($dir.Name) (Failed Verification)"
+              }
+          }
+          
+          Write-Output "=================================================="
+          Write-Output "LICENSE VERIFICATION SUMMARY"
+          Write-Output "=================================================="
+          Write-Output "SUCCESSFUL LIBRARIES ($($successList.Count)):"
+          foreach ($s in $successList) {
+              Write-Output "  - $s"
+          }
+          
+          Write-Output "FAILED LIBRARIES ($($failedList.Count)):"
+          foreach ($f in $failedList) {
+              Write-Output "  - $f"
+          }
+          
+          if ($failedList.Count -gt 0) {
+              # Do not fail workflow, just print warning, but we can fail if user prefers.
+              # Let's write warning to console.
+              Write-Warning "Verification completed: $($failedList.Count) libraries failed check!"
+          } else {
+              Write-Output "Verification SUCCESS: All libraries are successfully licensed/cracked!"
           }
