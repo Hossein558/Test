@@ -1,19 +1,86 @@
-name: Manual Windows Test Runner
+name: WinRAR Install and Extract Test
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-run:
+  winrar-test:
     runs-on: windows-latest
     steps:
-      - name: Checkout code
+      - name: Checkout Test Repository
         uses: actions/checkout@v4
 
-      - name: System Diagnostics
+      - name: Download WinRAR Installer
+        shell: powershell
         run: |
-          echo "GitHub Actions Windows Runner is active!"
-          echo "System Info:"
-          systeminfo | findstr /B /C:"OS Name" /C:"OS Version"
-          echo "Current Directory Contents:"
-          dir
+          Write-Output "Downloading WinRAR..."
+          Invoke-WebRequest -Uri "https://www.win-rar.com/fileadmin/winrar-versions/winrar/winrar-x64-723.exe" -OutFile "winrar-installer.exe"
+          Write-Output "WinRAR Installer downloaded."
+
+      - name: Install WinRAR Silently
+        shell: powershell
+        run: |
+          Write-Output "Installing WinRAR..."
+          Start-Process -FilePath "winrar-installer.exe" -ArgumentList "/S" -Wait
+          
+          # Verify unrar.exe exists
+          $unrar = "C:\Program Files\WinRAR\unrar.exe"
+          if (Test-Path $unrar) {
+              Write-Output "WinRAR successfully installed at $unrar"
+              & "$unrar" -version
+          } else {
+              Write-Error "WinRAR installation failed: unrar.exe not found."
+              exit 1
+          }
+
+      - name: Set up Git LFS and Clone Apose26
+        shell: powershell
+        env:
+          APOSE_PAT: ${{ secrets.APOSE26_PAT }}
+        run: |
+          Write-Output "Setting up Git LFS..."
+          git config --global filter.lfs.required true
+          git config --global filter.lfs.clean "git-lfs clean -- %f"
+          git config --global filter.lfs.smudge "git-lfs smudge -- %f"
+          git config --global filter.lfs.process "git-lfs filter-process"
+          git lfs install
+          
+          Write-Output "Cloning Apose26 private repository..."
+          git clone "https://$($env:APOSE_PAT)@github.com/Hossein558/Apose26.git" apose-repo
+          
+          Write-Output "Repository cloned. File listing:"
+          Get-ChildItem -Path "apose-repo"
+
+      - name: Extract and Verify RAR Files
+        shell: powershell
+        env:
+          RAR_PASSWORD: ${{ secrets.RAR_PASSWORD }}
+        run: |
+          $unrar = "C:\Program Files\WinRAR\unrar.exe"
+          $rarFiles = Get-ChildItem -Path "apose-repo" -Filter "*.rar"
+          $hasError = $false
+          
+          foreach ($file in $rarFiles) {
+              Write-Output "=================================================="
+              Write-Output "Testing & Extracting: $($file.Name)"
+              
+              $outDir = Join-Path "extracted" $file.BaseName
+              New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+              
+              # Execute unrar with password
+              $p = Start-Process -FilePath $unrar -ArgumentList "x", "-p$($env:RAR_PASSWORD)", "$($file.FullName)", "$outDir" -NoNewWindow -Wait -PassThru
+              
+              if ($p.ExitCode -ne 0) {
+                  Write-Error "Extraction FAILED for $($file.Name) with exit code $($p.ExitCode)"
+                  $hasError = $true
+              } else {
+                  Write-Output "Extraction SUCCESS for $($file.Name)"
+              }
+          }
+          
+          if ($hasError) {
+              Write-Error "One or more files failed extraction!"
+              exit 1
+          } else {
+              Write-Output "All archives successfully verified!"
+          }
