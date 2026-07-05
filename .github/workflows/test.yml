@@ -23,11 +23,9 @@ jobs:
           Write-Output "Installing WinRAR..."
           Start-Process -FilePath "winrar-installer.exe" -ArgumentList "/S" -Wait
           
-          # Verify unrar.exe exists
           $unrar = "C:\Program Files\WinRAR\unrar.exe"
           if (Test-Path $unrar) {
               Write-Output "WinRAR successfully installed at $unrar"
-              & "$unrar" -version
           } else {
               Write-Error "WinRAR installation failed: unrar.exe not found."
               exit 1
@@ -47,9 +45,6 @@ jobs:
           
           Write-Output "Cloning Apose26 private repository..."
           git clone "https://$($env:APOSE_PAT)@github.com/Hossein558/Apose26.git" apose-repo
-          
-          Write-Output "Repository cloned. File listing:"
-          Get-ChildItem -Path "apose-repo"
 
       - name: Extract and Verify RAR Files
         shell: powershell
@@ -64,14 +59,18 @@ jobs:
               Write-Output "=================================================="
               Write-Output "Testing & Extracting: $($file.Name)"
               
-              $outDir = Join-Path "extracted" $file.BaseName
+              # ایجاد مسیر استخراج با مسیر مطلق
+              $outDir = Join-Path (Get-Location).Path "extracted\$($file.BaseName)"
               New-Item -ItemType Directory -Force -Path $outDir | Out-Null
               
-              # Execute unrar with password using call & to handle spaces in filenames
-              & $unrar x "-p$($env:RAR_PASSWORD)" "$($file.FullName)" "$outDir\"
+              # راهحل قطعی فاصلهها: ورود به پوشه مقصد و اجرای اکسترکت در همان پوشه
+              Push-Location $outDir
+              & $unrar x "-p$($env:RAR_PASSWORD)" "$($file.FullName)"
+              $exitCode = $LASTEXITCODE
+              Pop-Location
               
-              if ($LASTEXITCODE -ne 0) {
-                  Write-Error "Extraction FAILED for $($file.Name) with exit code $LASTEXITCODE"
+              if ($exitCode -ne 0) {
+                  Write-Error "Extraction FAILED for $($file.Name) with exit code $exitCode"
                   $hasError = $true
               } else {
                   Write-Output "Extraction SUCCESS for $($file.Name)"
@@ -79,191 +78,90 @@ jobs:
           }
           
           if ($hasError) {
-              Write-Error "One or more files failed extraction!"
+              exit 1
+          }
+
+      - name: License Verification via C# Reflection
+        shell: powershell
+        run: |
+          # تعریف تستر C# به صورت درونخطی و لود کردن آن در پاورشل
+          $source = @"
+          using System;
+          using System.Reflection;
+          using System.IO;
+          using System.Linq;
+
+          public class AsposeValidator {
+              public static bool Validate(string dllPath, string licPath) {
+                  try {
+                      Assembly asm = Assembly.LoadFrom(dllPath);
+                      
+                      // یافتن داینامیک کلاس License
+                      Type licType = asm.GetTypes().FirstOrDefault(t => t.Name == "License" && t.IsClass);
+                      if (licType == null) {
+                          Console.WriteLine("[-] Class 'License' not found in DLL.");
+                          return false;
+                      }
+                      
+                      object licObj = Activator.CreateInstance(licType);
+                      MethodInfo setLicMethod = licType.GetMethod("SetLicense", new Type[] { typeof(string) });
+                      
+                      if (setLicMethod == null) {
+                          Console.WriteLine("[-] Method 'SetLicense' not found.");
+                          return false;
+                      }
+                      
+                      // اعمال لایسنس
+                      setLicMethod.Invoke(licObj, new object[] { licPath });
+                      return true;
+                  } catch (Exception ex) {
+                      Exception inner = ex.InnerException != null ? ex.InnerException : ex;
+                      Console.WriteLine("[-] Exception during validation: " + inner.Message);
+                      return false;
+                  }
+              }
+          }
+          "@
+          
+          Add-Type -TypeDefinition $source
+
+          $baseExtractedDir = (Get-Item "extracted").FullName
+          $packages = Get-ChildItem -Path $baseExtractedDir -Directory
+          $hasError = $false
+
+          foreach ($pkg in $packages) {
+              Write-Output "`n=================================================="
+              Write-Output "Validating License for: $($pkg.Name)"
+              
+              # پیدا کردن فایل لایسنس استخراج شده
+              $licFile = Get-ChildItem -Path $pkg.FullName -Recurse -Filter "*.lic" | Select-Object -First 1
+              
+              # نکته حیاتی: الزام به استفاده از نسخههای net4 یا net40 داتنت برای جلوگیری از کرش BadImageFormatException
+              $dllFile = Get-ChildItem -Path $pkg.FullName -Recurse -Filter "Aspose.*.dll" | Where-Object { $_.DirectoryName -match "net4|net3|net2" } | Select-Object -First 1
+              
+              if (-not $dllFile) {
+                  $dllFile = Get-ChildItem -Path $pkg.FullName -Recurse -Filter "Aspose.*.dll" | Select-Object -First 1
+              }
+
+              if ($licFile -and $dllFile) {
+                  Write-Output "-> Testing DLL: $($dllFile.FullName)"
+                  
+                  $success = [AsposeValidator]::Validate($dllFile.FullName, $licFile.FullName)
+                  
+                  if ($success) {
+                      Write-Output "[+] SUCCESS: License is strictly valid and accepted dynamically!"
+                  } else {
+                      Write-Error "[-] FAILED: Crack invalid or license rejected!"
+                      $hasError = $true
+                  }
+              } else {
+                  Write-Error "[-] Required DLL or License file missing!"
+                  $hasError = $true
+              }
+          }
+
+          if ($hasError) {
               exit 1
           } else {
-              Write-Output "All archives successfully verified!"
-          }
-
-      - name: Setup .NET Core and Create Tester
-        shell: powershell
-        run: |
-          # Create LicenseTester directory
-          New-Item -ItemType Directory -Force -Path "LicenseTester" | Out-Null
-          
-          $programCs = @'
-          using System;
-          using System.IO;
-          using System.Reflection;
-
-          class Program
-          {
-              static void Main(string[] args)
-              {
-                  if (args.Length < 1)
-                  {
-                      Console.WriteLine("Usage: dotnet run <path_to_dll> [path_to_lic]");
-                      return;
-                  }
-
-                  string dllPath = args[0];
-                  string licPath = args.Length > 1 ? args[1] : null;
-
-                  if (string.IsNullOrEmpty(licPath) || !File.Exists(licPath))
-                  {
-                      // If no license path provided, create a dummy one
-                      licPath = "dummy.lic";
-                      string dummyContent = @"<License>
-            <Data>
-              <LicensedTo>Soft98</LicensedTo>
-              <EmailTo>customer@soft98.ir</EmailTo>
-              <LicenseType>Developer Small Business</LicenseType>
-              <LicenseNote>Cracked</LicenseNote>
-              <OrderID>260705</OrderID>
-              <UserID>260705</UserID>
-              <OEM>This is a redistributable license</OEM>
-              <Products>
-                <Product>Aspose.Total for .NET</Product>
-              </Products>
-              <EditionType>Enterprise</EditionType>
-              <SerialNumber>12345</SerialNumber>
-              <SubscriptionExpiry>20301231</SubscriptionExpiry>
-              <LicenseVersion>3.0</LicenseVersion>
-            </Data>
-            <Signature>BypassSignatureChecker</Signature>
-          </License>";
-                      File.WriteAllText(licPath, dummyContent);
-                      Console.WriteLine("Using temporary dummy license for check.");
-                  }
-                  else
-                  {
-                      Console.WriteLine("Using actual license file: " + licPath);
-                  }
-
-                  try
-                  {
-                      // Load assembly
-                      Assembly assembly = Assembly.LoadFrom(dllPath);
-                      Console.WriteLine("Loaded assembly: " + assembly.FullName);
-
-                      // Find License class
-                      Type licenseType = null;
-                      foreach (Type type in assembly.GetTypes())
-                      {
-                          if (type.Name == "License" && type.IsClass && type.IsPublic)
-                          {
-                              licenseType = type;
-                              break;
-                          }
-                      }
-
-                      if (licenseType == null)
-                      {
-                          Console.WriteLine("RESULT: FAILED_NO_LICENSE_CLASS (Could not find public License class)");
-                          return;
-                      }
-
-                      // Create instance of License
-                      object licenseInstance = Activator.CreateInstance(licenseType);
-
-                      // Find SetLicense(string) method
-                      MethodInfo setLicenseMethod = licenseType.GetMethod("SetLicense", new Type[] { typeof(string) });
-                      if (setLicenseMethod == null)
-                      {
-                          Console.WriteLine("RESULT: FAILED_NO_SETLICENSE_METHOD (Could not find SetLicense(string) method)");
-                          return;
-                      }
-
-                      // Call SetLicense
-                      setLicenseMethod.Invoke(licenseInstance, new object[] { licPath });
-                      Console.WriteLine("RESULT: SUCCESS (License applied successfully without exceptions)");
-                  }
-                  catch (TargetInvocationException tie)
-                  {
-                      Console.WriteLine("RESULT: FAILED (SetLicense threw exception: " + (tie.InnerException != null ? tie.InnerException.Message : tie.Message) + ")");
-                  }
-                  catch (Exception e)
-                  {
-                      Console.WriteLine("RESULT: FAILED_ERROR (Error: " + e.Message + ")");
-                  }
-              }
-          }
-          '@
-          
-          # Initialize .NET Core console app
-          dotnet new console -o LicenseTester --force
-          
-          # Overwrite Program.cs with C# code
-          Set-Content -Path "LicenseTester\Program.cs" -Value $programCs -Force
-          
-          Write-Output "LicenseTester console app initialized successfully."
-
-      - name: Run License/Crack Verification
-        shell: powershell
-        run: |
-          $failedList = @()
-          $successList = @()
-          
-          $extractedDirs = Get-ChildItem -Path "extracted" -Directory
-          foreach ($dir in $extractedDirs) {
-              # Find and sort DLLs to prefer net8, net7, net6, standard before others
-              $dlls = Get-ChildItem -Path $dir.FullName -Filter "Aspose.*.dll" -Recurse | Sort-Object {
-                  if ($_.FullName -like "*net8*") { 1 }
-                  elif ($_.FullName -like "*net7*") { 2 }
-                  elif ($_.FullName -like "*net6*") { 3 }
-                  elif ($_.FullName -like "*netstandard*") { 4 }
-                  elif ($_.FullName -like "*netcore*") { 5 }
-                  else { 6 }
-              }
-              
-              if ($dlls.Count -eq 0) {
-                  Write-Warning "No Aspose.*.dll found in $($dir.Name)"
-                  $failedList += "$($dir.Name) (No DLL found)"
-                  continue
-              }
-              
-              $dll = $dlls[0]
-              
-              # Search for any .lic file in the extracted folder (e.g. Aspose.Total.NET.lic)
-              $licFiles = Get-ChildItem -Path $dir.FullName -Filter "*.lic" -Recurse
-              $licPathArg = ""
-              if ($licFiles.Count -gt 0) {
-                  $licPathArg = "$($licFiles[0].FullName)"
-                  Write-Output "Found license key: $($licFiles[0].Name) for $($dir.Name)"
-              } else {
-                  Write-Output "No license file found in $($dir.Name). Will use dummy license."
-              }
-              
-              Write-Output "=================================================="
-              Write-Output "Verifying License for: $($dir.Name)"
-              Write-Output "Selected DLL: $($dll.FullName)"
-              
-              # Run test program
-              $testResult = dotnet run --project LicenseTester -- "$($dll.FullName)" "$licPathArg" 2>&1
-              Write-Output $testResult
-              
-              if ($testResult -like "*RESULT: SUCCESS*") {
-                  $successList += $dir.Name
-              } else {
-                  $failedList += "$($dir.Name) (Failed Verification)"
-              }
-          }
-          
-          Write-Output "=================================================="
-          Write-Output "LICENSE VERIFICATION SUMMARY"
-          Write-Output "=================================================="
-          Write-Output "SUCCESSFUL LIBRARIES ($($successList.Count)):"
-          foreach ($s in $successList) {
-              Write-Output "  - $s"
-          }
-          
-          Write-Output "FAILED LIBRARIES ($($failedList.Count)):"
-          foreach ($f in $failedList) {
-              Write-Output "  - $f"
-          }
-          
-          if ($failedList.Count -gt 0) {
-              Write-Warning "Verification completed: $($failedList.Count) libraries failed check!"
-          } else {
-              Write-Output "Verification SUCCESS: All libraries are successfully licensed/cracked!"
+              Write-Output "`n[+] ALL ASPOSE PACKAGES VALIDATED SUCCESSFULLY!"
           }
