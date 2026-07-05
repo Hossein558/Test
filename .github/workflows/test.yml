@@ -102,15 +102,18 @@ jobs:
               {
                   if (args.Length < 1)
                   {
-                      Console.WriteLine("Usage: dotnet run <path_to_dll>");
+                      Console.WriteLine("Usage: dotnet run <path_to_dll> [path_to_lic]");
                       return;
                   }
 
                   string dllPath = args[0];
-                  string licPath = "dummy.lic";
+                  string licPath = args.Length > 1 ? args[1] : null;
 
-                  // Create dummy license file with invalid signature (unpatched DLLs will fail)
-                  string licContent = @"<License>
+                  if (string.IsNullOrEmpty(licPath) || !File.Exists(licPath))
+                  {
+                      // If no license path provided, create a dummy one
+                      licPath = "dummy.lic";
+                      string dummyContent = @"<License>
             <Data>
               <LicensedTo>Soft98</LicensedTo>
               <EmailTo>customer@soft98.ir</EmailTo>
@@ -129,8 +132,13 @@ jobs:
             </Data>
             <Signature>BypassSignatureChecker</Signature>
           </License>";
-
-                  File.WriteAllText(licPath, licContent);
+                      File.WriteAllText(licPath, dummyContent);
+                      Console.WriteLine("Using temporary dummy license for check.");
+                  }
+                  else
+                  {
+                      Console.WriteLine("Using actual license file: " + licPath);
+                  }
 
                   try
                   {
@@ -172,7 +180,7 @@ jobs:
                   }
                   catch (TargetInvocationException tie)
                   {
-                      Console.WriteLine("RESULT: FAILED (SetLicense threw exception: " + tie.InnerException.Message + ")");
+                      Console.WriteLine("RESULT: FAILED (SetLicense threw exception: " + (tie.InnerException != null ? tie.InnerException.Message : tie.Message) + ")");
                   }
                   catch (Exception e)
                   {
@@ -215,12 +223,23 @@ jobs:
               }
               
               $dll = $dlls[0]
+              
+              # Search for any .lic file in the extracted folder (e.g. Aspose.Total.NET.lic)
+              $licFiles = Get-ChildItem -Path $dir.FullName -Filter "*.lic" -Recurse
+              $licPathArg = ""
+              if ($licFiles.Count -gt 0) {
+                  $licPathArg = "$($licFiles[0].FullName)"
+                  Write-Output "Found license key: $($licFiles[0].Name) for $($dir.Name)"
+              } else {
+                  Write-Output "No license file found in $($dir.Name). Will use dummy license."
+              }
+              
               Write-Output "=================================================="
               Write-Output "Verifying License for: $($dir.Name)"
               Write-Output "Selected DLL: $($dll.FullName)"
               
               # Run test program
-              $testResult = dotnet run --project LicenseTester -- "$($dll.FullName)" 2>&1
+              $testResult = dotnet run --project LicenseTester -- "$($dll.FullName)" "$licPathArg" 2>&1
               Write-Output $testResult
               
               if ($testResult -like "*RESULT: SUCCESS*") {
@@ -244,8 +263,6 @@ jobs:
           }
           
           if ($failedList.Count -gt 0) {
-              # Do not fail workflow, just print warning, but we can fail if user prefers.
-              # Let's write warning to console.
               Write-Warning "Verification completed: $($failedList.Count) libraries failed check!"
           } else {
               Write-Output "Verification SUCCESS: All libraries are successfully licensed/cracked!"
