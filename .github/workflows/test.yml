@@ -67,11 +67,11 @@ jobs:
               $outDir = Join-Path "extracted" $file.BaseName
               New-Item -ItemType Directory -Force -Path $outDir | Out-Null
               
-              # Execute unrar with password
-              $p = Start-Process -FilePath $unrar -ArgumentList "x", "-p$($env:RAR_PASSWORD)", "$($file.FullName)", "$outDir" -NoNewWindow -Wait -PassThru
+              # Execute unrar with password using call & to handle spaces in filenames
+              & $unrar x "-p$($env:RAR_PASSWORD)" "$($file.FullName)" "$outDir"
               
-              if ($p.ExitCode -ne 0) {
-                  Write-Error "Extraction FAILED for $($file.Name) with exit code $($p.ExitCode)"
+              if ($LASTEXITCODE -ne 0) {
+                  Write-Error "Extraction FAILED for $($file.Name) with exit code $LASTEXITCODE"
                   $hasError = $true
               } else {
                   Write-Output "Extraction SUCCESS for $($file.Name)"
